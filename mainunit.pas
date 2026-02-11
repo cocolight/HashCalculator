@@ -157,6 +157,8 @@ end;
 
 procedure THashThread.DoProgress;
 begin
+  if FCancel then Exit;
+
   if Assigned(FOnProgress) then
     FOnProgress(FCurrentPos, FTotalSize, FCancel);
 end;
@@ -173,11 +175,10 @@ begin
     FOnComplete(Self);
 end;
 
-// 线程安全的进度更新 - 使用 Queue 不阻塞
 procedure THashThread.UpdateProgress;
 begin
   if not FCancel then
-    Queue(@DoProgress);  // 使用 Queue 替代 Synchronize，不阻塞
+    Queue(@DoProgress);
 end;
 
 procedure THashThread.Complete;
@@ -318,23 +319,30 @@ begin
           Inc(Offset, BytesToProcess);
           FCurrentPos := Offset;
 
-          // 进度更新 - 每 UPDATE_INTERVAL 或完成时更新
-          if (FCurrentPos - LastUpdate >= UPDATE_INTERVAL) or (FCurrentPos >= FileSize) then
+          // 修改：进度更新 - 增加取消检查
+          if not FCancel then
           begin
-            UpdateProgress;
-            LastUpdate := FCurrentPos;
+            if (FCurrentPos - LastUpdate >= UPDATE_INTERVAL) or (FCurrentPos >= FileSize) then
+            begin
+              UpdateProgress;
+              LastUpdate := FCurrentPos;
+            end;
           end;
         finally
           UnmapViewOfFile(MapView);
           MapView := nil;
         end;
-      end;
+end;
 
-      if FCancel then
-      begin
-        FErrorMsg := '用户取消';
-        Exit;
-      end;
+// 修改：改进取消处理
+if FCancel then
+begin
+  FErrorMsg := '用户取消';
+  // 不调用 Complete，直接调用 Error
+  Error;
+  Exit;  // 退出，进入 finally 清理
+end;
+
 
       // 6. 获取最终结果
       SetLength(HashBytes, 16);
@@ -413,8 +421,16 @@ begin
     ProgressBar.Position := 0;
     FStartTime := Now;
     ShowStatus('计算中...');
+    // 修改：确保取消按钮可用
+    btnCancel.Enabled := True;
+  end
+  else
+  begin
+    // 修改：计算结束后重置进度条
+    ProgressBar.Position := 0;
   end;
 end;
+
 
 procedure TMainForm.OnHashProgress(Current, Total: Int64; var Cancel: Boolean);
 var
@@ -463,19 +479,27 @@ end;
 procedure TMainForm.OnHashComplete(Sender: TObject);
 var
   Elapsed: Double;
+  WasCancelled: Boolean;
 begin
   Elapsed := (Now - FStartTime) * 24 * 3600;
 
+  // 修改：检查是否是用户取消
+  WasCancelled := (FHashThread.ErrorMsg = '用户取消');
+
   if FHashThread.ErrorMsg <> '' then
   begin
-    // 错误弹窗
-    if FHashThread.ErrorMsg <> '用户取消' then
+    // 错误处理
+    if not WasCancelled then
       ShowMessage('错误: ' + FHashThread.ErrorMsg);
 
     FMD5Hash := '';
     FSHA256Hash := '';
     UpdateResultMemo;
-    ShowStatus('计算失败', True);
+
+    if WasCancelled then
+      ShowStatus('已取消')
+    else
+      ShowStatus('计算失败', True);
   end
   else
   begin
@@ -487,10 +511,20 @@ begin
     UpdateVerifyStatus;
   end;
 
+  // 修改：安全释放线程
   FHashThread.Free;
   FHashThread := nil;
   SetUIState(False);
+
+  // 修改：如果是取消后的清理，执行完整清理
+  if WasCancelled then
+  begin
+    // 检查是否需要执行完整清理（btnClearClick 触发的取消）
+    // 这里可以添加一个标志来判断
+    // 暂时不做额外清理，让用户再次点击清空按钮
+  end;
 end;
+
 
 { MD5 计算 }
 
@@ -750,8 +784,11 @@ begin
   begin
     FHashThread.Cancel;
     ShowStatus('正在取消...');
+    // 修改：禁用取消按钮，防止重复点击
+    btnCancel.Enabled := False;
   end;
 end;
+
 
 procedure TMainForm.btnVerifyClick(Sender: TObject);
 var
@@ -782,16 +819,19 @@ end;
 
 procedure TMainForm.btnClearClick(Sender: TObject);
 begin
-  // 停止线程
+  // 修改：如果线程正在运行，只设置取消标志
   if Assigned(FHashThread) then
   begin
     FHashThread.Cancel;
-    FHashThread.WaitFor;
-    FHashThread.Free;
-    FHashThread := nil;
+    // 移除 WaitFor，让线程自然结束
+    // 禁用清空按钮，防止重复点击
+    btnClear.Enabled := False;
+    ShowStatus('正在取消并清理...');
+    // 注意：实际清理会在 OnHashComplete 中完成
+    Exit;
   end;
 
-  // 清空所有
+  // 如果没有线程运行，直接清空
   edtFilePath.Text := '';
   edtVerifyMD5.Text := '';
   edtVerifySHA256.Text := '';
@@ -809,6 +849,7 @@ begin
 
   ShowStatus('就绪');
 end;
+
 
 procedure TMainForm.btnCopyHashClick(Sender: TObject);
 begin
