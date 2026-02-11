@@ -3,7 +3,7 @@
   <ProjectSession>
     <PathDelim Value="\"/>
     <Version Value="12"/>
-    <BuildModes Active="Release"/>
+    <BuildModes Active="Default"/>
     <Units>
       <Unit>
         <Filename Value="HashCalculator.lpr"/>
@@ -12,7 +12,7 @@
         <WindowIndex Value="-1"/>
         <TopLine Value="-1"/>
         <CursorPos X="-1" Y="-1"/>
-        <UsageCount Value="32"/>
+        <UsageCount Value="33"/>
       </Unit>
       <Unit>
         <Filename Value="mainunit.pas"/>
@@ -21,10 +21,10 @@
         <HasResources Value="True"/>
         <ResourceBaseClass Value="Form"/>
         <IsVisibleTab Value="True"/>
-        <TopLine Value="377"/>
+        <TopLine Value="302"/>
         <CursorPos Y="433"/>
-        <FoldState Value=" T3kE079 plYmM0E4 pjakL0Y2 piajd0H[I4C]993 PiMiU0x"/>
-        <UsageCount Value="32"/>
+        <FoldState Value=" T3kE07814 pk7oY0l3 pjRl50H4]9Cjd093 PiMiU0j"/>
+        <UsageCount Value="33"/>
         <Loaded Value="True"/>
         <LoadedDesigner Value="True"/>
       </Unit>
