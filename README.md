@@ -22,11 +22,12 @@
 ## 🛠️ 编译说明
 若需自行编译源码，需满足以下条件：
 1. 安装最新版 [Lazarus IDE](https://www.lazarus-ide.org/)；
-2. 确保项目已引入 `Hash`、`sha1`、`sha256`、`md5` 等哈希相关单元；
+2. 确保项目已引入 `sha256`、`md5` 等哈希相关单元；
 3. 打开项目文件（`.lpi`），选择对应平台（Windows/Linux/macOS），点击「运行」或「编译」即可生成可执行文件。
 
 ## 🎨 界面预览
-<img width="777" height="686" alt="image" src="https://github.com/user-attachments/assets/a8d9f97b-5d49-44db-900a-31508fa33a7e" />
+<img width="777" height="767" alt="image" src="https://github.com/user-attachments/assets/1167bc77-b566-4f2f-a185-efdf78e7cd78" />
+
 
 > 主界面分为「文件选择区」「哈希类型选择区」「结果展示区」三部分，控件布局紧凑且不拥挤，操作流程一键直达。
 
@@ -36,4 +37,3 @@
 ## 💡 常见问题
 1. **计算失败提示「文件不存在」**：检查所选文件路径是否正确，或文件是否被其他程序占用；
 2. **大文件计算卡顿**：程序已做分块读取优化，卡顿多为文件本身过大或磁盘读写速度限制，耐心等待即可；
-3. **结果区域无法编辑**：为保护结果准确性，结果框默认只读，如需复制可直接选中内容后按 `Ctrl+C`。
