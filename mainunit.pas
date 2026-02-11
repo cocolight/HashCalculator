@@ -6,53 +6,107 @@ interface
 
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, ExtCtrls,
-  DCPmd5, DCPsha256, Clipbrd, Windows;
+  DCPmd5, DCPsha256, Clipbrd, ComCtrls, Windows, LazUTF8;
 
 type
+
+  // 进度回调类型
+  TProgressCallback = procedure(Current, Total: Int64; var Cancel: Boolean) of object;
+
+  // 哈希计算线程 - 使用内存映射文件
+  THashThread = class(TThread)
+  private
+    FFileName: string;
+    FUpperCase: Boolean;
+    FMD5Result: string;
+    FSHA256Result: string;
+    FErrorMsg: string;
+    FOnProgress: TProgressCallback;
+    FOnComplete: TNotifyEvent;
+    FCurrentPos: Int64;
+    FTotalSize: Int64;
+    FCancel: Boolean;
+    procedure DoProgress;
+    procedure DoComplete;
+    procedure DoError;
+    procedure UpdateProgress;
+    procedure Complete;
+    procedure Error;
+    function BytesToHex(const Bytes: array of Byte; UpperCase: Boolean): string;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const FileName: string; UpperCase: Boolean);
+    procedure Cancel;
+    property MD5Result: string read FMD5Result;
+    property SHA256Result: string read FSHA256Result;
+    property ErrorMsg: string read FErrorMsg;
+    property OnProgress: TProgressCallback read FOnProgress write FOnProgress;
+    property OnComplete: TNotifyEvent read FOnComplete write FOnComplete;
+    property TotalSize: Int64 read FTotalSize;
+  end;
 
   { TMainForm }
 
   TMainForm = class(TForm)
     btnBrowseFile: TButton;
     btnCalculate: TButton;
-    btnCopyMD5: TButton;
-    btnCopySHA256: TButton;
+    btnCopyHash: TButton;
     btnVerify: TButton;
     btnClear: TButton;
+    btnCancel: TButton;
+    chkSHA256: TCheckBox;
+    chkMD5: TCheckBox;
     chkUpperCase: TCheckBox;
     edtFilePath: TEdit;
     edtVerifyMD5: TEdit;
     edtVerifySHA256: TEdit;
+    GroupBox1: TGroupBox;
+    GroupBox2: TGroupBox;
+    GroupBox3: TGroupBox;
     GroupBoxFile: TGroupBox;
     GroupBoxSettings: TGroupBox;
     GroupBoxResult: TGroupBox;
     GroupBoxVerify: TGroupBox;
+    lblStatus: TLabel;
     lblFile: TLabel;
-    lblMD5Result: TLabel;
-    lblSHA256Result: TLabel;
     lblVerifyMD5: TLabel;
     lblVerifySHA256: TLabel;
     lblMD5Status: TLabel;
     lblSHA256Status: TLabel;
+    memoResult: TMemo;
     OpenDialog: TOpenDialog;
+    Panel2: TPanel;
     PanelButtons: TPanel;
+    ProgressBar: TProgressBar;
     procedure btnBrowseFileClick(Sender: TObject);
     procedure btnCalculateClick(Sender: TObject);
     procedure btnClearClick(Sender: TObject);
+    procedure btnCancelClick(Sender: TObject);
     procedure btnCopyHashClick(Sender: TObject);
-    procedure btnCopyMD5Click(Sender: TObject);
-    procedure btnCopySHA256Click(Sender: TObject);
-    //procedure btnCopyHash(Sender: TObject);
     procedure btnVerifyClick(Sender: TObject);
     procedure FormCreate(Sender: TObject);
+    procedure FormDestroy(Sender: TObject);
   private
     FMD5Hash: string;
     FSHA256Hash: string;
+    FHashThread: THashThread;
+    FStartTime: TDateTime;
+    FFileName: string;
+    FFileSize: Int64;
+    FFileDate: TDateTime;
     function CalculateMD5(const FileName: string): string;
     function CalculateSHA256(const FileName: string): string;
-    function BytesToHex(const Bytes: array of Byte; UpperCase: Boolean): string;
+    function FormatFileSize(Size: Int64): string;
     procedure UpdateVerifyStatus;
+    procedure OnHashProgress(Current, Total: Int64; var Cancel: Boolean);
+    procedure OnHashComplete(Sender: TObject);
+    procedure SetUIState(Calculating: Boolean);
+    procedure ShowStatus(const Msg: string; IsError: Boolean = False);
+    procedure UpdateResultMemo;
+
   public
+
   end;
 
 var
@@ -62,15 +116,14 @@ implementation
 
 {$R *.lfm}
 
-{ 辅助函数 }
-
-function TMainForm.BytesToHex(const Bytes: array of Byte; UpperCase: Boolean): string;
+// 独立的全局函数
+function BytesToHex(const Bytes: array of Byte; UpperCase: Boolean): string;
 const
   HexDigitsLower: array[0..15] of Char = '0123456789abcdef';
   HexDigitsUpper: array[0..15] of Char = '0123456789ABCDEF';
 var
   i: Integer;
-  HexDigits: array[0..15] of Char = '000000';
+  HexDigits: array[0..15] of Char;
 begin
   Result := '';
   if UpperCase then
@@ -84,6 +137,359 @@ begin
     Result[i * 2 + 1] := HexDigits[Bytes[i] shr 4];
     Result[i * 2 + 2] := HexDigits[Bytes[i] and $0F];
   end;
+end;
+
+{=================== THashThread 实现 ===================}
+
+constructor THashThread.Create(const FileName: string; UpperCase: Boolean);
+begin
+  inherited Create(True);
+  FFileName := FileName;
+  FUpperCase := UpperCase;
+  FCancel := False;
+  FreeOnTerminate := False;
+end;
+
+procedure THashThread.Cancel;
+begin
+  FCancel := True;
+end;
+
+procedure THashThread.DoProgress;
+begin
+  if Assigned(FOnProgress) then
+    FOnProgress(FCurrentPos, FTotalSize, FCancel);
+end;
+
+procedure THashThread.DoComplete;
+begin
+  if Assigned(FOnComplete) then
+    FOnComplete(Self);
+end;
+
+procedure THashThread.DoError;
+begin
+  if Assigned(FOnComplete) then
+    FOnComplete(Self);
+end;
+
+// 线程安全的进度更新 - 使用 Queue 不阻塞
+procedure THashThread.UpdateProgress;
+begin
+  if not FCancel then
+    Queue(@DoProgress);  // 使用 Queue 替代 Synchronize，不阻塞
+end;
+
+procedure THashThread.Complete;
+begin
+  Queue(@DoComplete);
+end;
+
+procedure THashThread.Error;
+begin
+  Queue(@DoError);
+end;
+
+function THashThread.BytesToHex(const Bytes: array of Byte; UpperCase: Boolean): string;
+const
+  HexDigitsLower: array[0..15] of Char = '0123456789abcdef';
+  HexDigitsUpper: array[0..15] of Char = '0123456789ABCDEF';
+var
+  i: Integer;
+  HexDigits: array[0..15] of Char;
+begin
+  Result := '';
+  if UpperCase then
+    Move(HexDigitsUpper, HexDigits, SizeOf(HexDigits))
+  else
+    Move(HexDigitsLower, HexDigits, SizeOf(HexDigits));
+
+  SetLength(Result, Length(Bytes) * 2);
+  for i := 0 to High(Bytes) do
+  begin
+    Result[i * 2 + 1] := HexDigits[Bytes[i] shr 4];
+    Result[i * 2 + 2] := HexDigits[Bytes[i] and $0F];
+  end;
+end;
+
+// 内存映射文件版本的核心计算
+procedure THashThread.Execute;
+const
+  VIEW_SIZE = 64 * 1024 * 1024; // 64MB 视图，减少映射次数
+  UPDATE_INTERVAL = 256 * 1024 * 1024; // 每 256MB 更新一次进度
+var
+  MD5: TDCP_md5;
+  SHA256: TDCP_sha256;
+  FileHandle: THandle;
+  MapHandle: THandle;
+  MapView: Pointer;
+  FileSizeHigh, FileSizeLow: DWORD;
+  FileSize: Int64;
+  Offset: Int64;
+  BytesToProcess: DWORD;
+  HashBytes: array of Byte;
+  LastUpdate: Int64;
+  WideFileName: WideString;
+begin
+  FMD5Result := '';
+  FSHA256Result := '';
+  FErrorMsg := '';
+  FileHandle := INVALID_HANDLE_VALUE;
+  MapHandle := 0;
+  MapView := nil;
+
+  try
+    WideFileName := UTF8ToUTF16(FFileName);
+    // 1. 打开文件
+    FileHandle := CreateFileW(
+      PWideChar(WideFileName),
+      GENERIC_READ,
+      FILE_SHARE_READ or FILE_SHARE_WRITE,
+      nil,
+      OPEN_EXISTING,
+      FILE_FLAG_SEQUENTIAL_SCAN,
+      0
+    );
+
+    if FileHandle = INVALID_HANDLE_VALUE then
+      raise Exception.Create('无法打开文件: ' + SysErrorMessage(GetLastError));
+
+    // 2. 获取文件大小
+    FileSizeLow := GetFileSize(FileHandle, @FileSizeHigh);
+    FileSize := (Int64(FileSizeHigh) shl 32) or FileSizeLow;
+    FTotalSize := FileSize;
+
+    if FileSize = 0 then
+      raise Exception.Create('文件为空');
+
+    // 3. 创建文件映射
+    MapHandle := CreateFileMapping(
+      FileHandle,
+      nil,
+      PAGE_READONLY,
+      0,
+      0,
+      nil
+    );
+
+    if MapHandle = 0 then
+      raise Exception.Create('无法创建文件映射: ' + SysErrorMessage(GetLastError));
+
+    // 4. 初始化哈希算法
+    MD5 := TDCP_md5.Create(nil);
+    SHA256 := TDCP_sha256.Create(nil);
+    try
+      MD5.Init;
+      SHA256.Init;
+
+      Offset := 0;
+      LastUpdate := 0;
+      FCurrentPos := 0;
+
+      // 发送初始进度
+      UpdateProgress;
+
+      // 5. 循环映射视图并计算
+      while (Offset < FileSize) and not FCancel do
+      begin
+        // 计算本次要处理的字节数
+        if FileSize - Offset > VIEW_SIZE then
+          BytesToProcess := VIEW_SIZE
+        else
+          BytesToProcess := DWORD(FileSize - Offset);
+
+        // 映射视图
+        MapView := MapViewOfFile(
+          MapHandle,
+          FILE_MAP_READ,
+          DWORD(Offset shr 32),
+          DWORD(Offset and $FFFFFFFF),
+          BytesToProcess
+        );
+
+        if MapView = nil then
+          raise Exception.Create('无法映射视图: ' + SysErrorMessage(GetLastError));
+
+        try
+          // 更新哈希 - 这是核心计算
+          MD5.Update(MapView^, BytesToProcess);
+          SHA256.Update(MapView^, BytesToProcess);
+
+          Inc(Offset, BytesToProcess);
+          FCurrentPos := Offset;
+
+          // 进度更新 - 每 UPDATE_INTERVAL 或完成时更新
+          if (FCurrentPos - LastUpdate >= UPDATE_INTERVAL) or (FCurrentPos >= FileSize) then
+          begin
+            UpdateProgress;
+            LastUpdate := FCurrentPos;
+          end;
+        finally
+          UnmapViewOfFile(MapView);
+          MapView := nil;
+        end;
+      end;
+
+      if FCancel then
+      begin
+        FErrorMsg := '用户取消';
+        Exit;
+      end;
+
+      // 6. 获取最终结果
+      SetLength(HashBytes, 16);
+      MD5.Final(HashBytes[0]);
+      FMD5Result := BytesToHex(HashBytes, FUpperCase);
+
+      SetLength(HashBytes, 32);
+      SHA256.Final(HashBytes[0]);
+      FSHA256Result := BytesToHex(HashBytes, FUpperCase);
+
+    finally
+      MD5.Free;
+      SHA256.Free;
+    end;
+
+    Complete;
+
+  except
+    on E: Exception do
+    begin
+      FErrorMsg := E.Message;
+      Error;
+    end;
+  end;
+
+  // 清理资源
+  if MapHandle <> 0 then
+    CloseHandle(MapHandle);
+  if FileHandle <> INVALID_HANDLE_VALUE then
+    CloseHandle(FileHandle);
+end;
+
+
+{=================== TMainForm 辅助方法 ===================}
+
+function TMainForm.FormatFileSize(Size: Int64): string;
+const
+  KB = 1024;
+  MB = 1024 * KB;
+  GB = 1024 * MB;
+begin
+  if Size < KB then
+    Result := Format('%d B', [Size])
+  else if Size < MB then
+    Result := Format('%.1f KB', [Size / KB])
+  else if Size < GB then
+    Result := Format('%.1f MB', [Size / MB])
+  else
+    Result := Format('%.2f GB', [Size / GB]);
+end;
+
+procedure TMainForm.ShowStatus(const Msg: string; IsError: Boolean = False);
+begin
+  lblStatus.Caption := Msg;
+  if IsError then
+    lblStatus.Font.Color := clRed
+  else
+    lblStatus.Font.Color := clGreen;
+end;
+
+procedure TMainForm.SetUIState(Calculating: Boolean);
+begin
+  btnCalculate.Visible := not Calculating;
+  btnCancel.Visible := Calculating;
+  btnBrowseFile.Enabled := not Calculating;
+  btnClear.Enabled := not Calculating;
+  btnVerify.Enabled := not Calculating and (FMD5Hash <> '');
+  btnCopyHash.Enabled := not Calculating and ((FMD5Hash <> '') or (FSHA256Hash <> ''));
+
+  if Calculating then
+  begin
+    // memoResult.Clear;
+    FMD5Hash := '';
+    FSHA256Hash := '';
+    UpdateResultMemo;
+    ProgressBar.Position := 0;
+    FStartTime := Now;
+    ShowStatus('计算中...');
+  end;
+end;
+
+procedure TMainForm.OnHashProgress(Current, Total: Int64; var Cancel: Boolean);
+var
+  Percent: Integer;
+  Elapsed: Double;
+  Speed: Double;
+  Remaining: Double;
+  StatusMsg: string;
+begin
+  if Total <= 0 then Exit;
+
+  Percent := Round((Current / Total) * 100);
+
+  // 限制进度条更新频率
+  if Abs(ProgressBar.Position - Percent) < 1 then Exit;
+
+  ProgressBar.Position := Percent;
+
+  // 构建状态信息
+  StatusMsg := Format('计算中 %d%% (%s / %s)',
+    [Percent, FormatFileSize(Current), FormatFileSize(Total)]);
+
+  // 计算速度和剩余时间
+  Elapsed := (Now - FStartTime) * 24 * 3600;
+  if Elapsed > 0 then
+  begin
+    Speed := Current / Elapsed;
+    Remaining := (Total - Current) / Speed;
+
+    // 合并显示:百分比 + 大小 + 速度 + 剩余时间
+    StatusMsg := Format('计算中 %d%% | %s/s | 剩余%d秒 | %s/%s',
+      [Percent,
+       FormatFileSize(Round(Speed)),
+       Round(Remaining),
+       FormatFileSize(Current),
+       FormatFileSize(Total)]);
+  end;
+
+  ShowStatus(StatusMsg);
+
+  // 强制刷新
+  lblStatus.Repaint;
+  ProgressBar.Repaint;
+end;
+
+procedure TMainForm.OnHashComplete(Sender: TObject);
+var
+  Elapsed: Double;
+begin
+  Elapsed := (Now - FStartTime) * 24 * 3600;
+
+  if FHashThread.ErrorMsg <> '' then
+  begin
+    // 错误弹窗
+    if FHashThread.ErrorMsg <> '用户取消' then
+      ShowMessage('错误: ' + FHashThread.ErrorMsg);
+
+    FMD5Hash := '';
+    FSHA256Hash := '';
+    UpdateResultMemo;
+    ShowStatus('计算失败', True);
+  end
+  else
+  begin
+    FMD5Hash := FHashThread.MD5Result;
+    FSHA256Hash := FHashThread.SHA256Result;
+
+    UpdateResultMemo;
+    ShowStatus(Format('计算完成 | 耗时 %.1f秒', [Elapsed]));
+    UpdateVerifyStatus;
+  end;
+
+  FHashThread.Free;
+  FHashThread := nil;
+  SetUIState(False);
 end;
 
 { MD5 计算 }
@@ -215,21 +621,101 @@ end;
 
 procedure TMainForm.FormCreate(Sender: TObject);
 begin
+  FHashThread := nil;
+  FFileName := '';
+  FFileSize := 0;
+  FFileDate := 0;
   FMD5Hash := '';
   FSHA256Hash := '';
-  lblMD5Result.Caption := '(未计算)';
-  lblSHA256Result.Caption := '(未计算)';
+
   lblMD5Status.Caption := '-';
   lblSHA256Status.Caption := '-';
+  ProgressBar.Position := 0;
   chkUpperCase.Checked := True;
+  memoResult.Clear;
+
+  ShowStatus('就绪');
+  SetUIState(False);
+end;
+
+procedure TMainForm.FormDestroy(Sender: TObject);
+begin
+  if Assigned(FHashThread) then
+  begin
+    FHashThread.Cancel;
+    FHashThread.WaitFor;
+    FHashThread.Free;
+  end;
 end;
 
 procedure TMainForm.btnBrowseFileClick(Sender: TObject);
+var
+  SearchRec: TSearchRec;
 begin
   if OpenDialog.Execute then
   begin
-    edtFilePath.Text := OpenDialog.FileName;
+    FFileName := OpenDialog.FileName;
+    edtFilePath.Text := FFileName;
+
+    // 获取文件信息
+    if FindFirst(FFileName, faAnyFile, SearchRec) = 0 then
+    begin
+      FFileSize := SearchRec.Size;
+      FFileDate := FileDateToDateTime(SearchRec.Time);
+      SysUtils.FindClose(SearchRec);
+
+    end
+    else
+    begin
+      FFileSize := 0;
+      FFileDate := 0;
+    end;
+
+    // 清空结果
+    FMD5Hash := '';
+    FSHA256Hash := '';
+    // memoResult.Clear;
+    UpdateResultMemo;
+    lblMD5Status.Caption := '-';
+    lblSHA256Status.Caption := '-';
+    ProgressBar.Position := 0;
+
+    ShowStatus('已选择文件');
   end;
+end;
+
+procedure TMainForm.UpdateResultMemo;
+var
+  FileNameOnly: string;
+begin
+  memoResult.Clear;
+
+  // 文件名称（仅文件名，不含路径）
+  FileNameOnly := ExtractFileName(FFileName);
+  memoResult.Lines.Add('文件名称: ' + FileNameOnly);
+
+  // 文件大小
+  if FFileSize > 0 then
+    memoResult.Lines.Add('文件大小: ' + FormatFileSize(FFileSize))
+  else
+    memoResult.Lines.Add('文件大小: -');
+
+  // 修改日期
+  if FFileDate > 0 then
+    memoResult.Lines.Add('修改日期: ' + FormatDateTime('yyyy-mm-dd hh:nn:ss', FFileDate))
+  else
+    memoResult.Lines.Add('修改日期: -');
+
+  // 哈希值
+  if FMD5Hash <> '' then
+    memoResult.Lines.Add('MD5:  ' + FMD5Hash)
+  else
+    memoResult.Lines.Add('MD5:  -');
+
+  if FSHA256Hash <> '' then
+    memoResult.Lines.Add('SHA-256:  ' + FSHA256Hash)
+  else
+    memoResult.Lines.Add('SHA-256:  -');
 end;
 
 procedure TMainForm.btnCalculateClick(Sender: TObject);
@@ -249,80 +735,90 @@ begin
     Exit;
   end;
 
-  Screen.Cursor := crHourGlass;
-  try
-    // 同时计算两种哈希
-    FMD5Hash := CalculateMD5(FileName);
-    FSHA256Hash := CalculateSHA256(FileName);
+  // 创建并启动线程
+  FHashThread := THashThread.Create(FileName, chkUpperCase.Checked);
+  FHashThread.OnProgress := @OnHashProgress;
+  FHashThread.OnComplete := @OnHashComplete;
 
-    // 显示结果
-    lblMD5Result.Caption := FMD5Hash;
-    lblSHA256Result.Caption := FSHA256Hash;
+  SetUIState(True);
+  FHashThread.Start;
+end;
 
-    // 更新验证状态（如果验证框已有内容）
-    UpdateVerifyStatus;
-  finally
-    Screen.Cursor := crDefault;
+procedure TMainForm.btnCancelClick(Sender: TObject);
+begin
+  if Assigned(FHashThread) then
+  begin
+    FHashThread.Cancel;
+    ShowStatus('正在取消...');
   end;
-end;
-
-procedure TMainForm.btnCopyMD5Click(Sender: TObject);
-begin
-  if FMD5Hash <> '' then
-  begin
-    Clipboard.AsText := FMD5Hash;
-    ShowMessage('MD5 已复制');
-  end
-  else
-    ShowMessage('请先计算');
-end;
-
-procedure TMainForm.btnCopySHA256Click(Sender: TObject);
-begin
-  if FSHA256Hash <> '' then
-  begin
-    Clipboard.AsText := FSHA256Hash;
-    ShowMessage('SHA-256 已复制');
-  end
-  else
-    ShowMessage('请先计算');
 end;
 
 procedure TMainForm.btnVerifyClick(Sender: TObject);
+var
+  verifyMD5Empty, verifySHA256Empty: Boolean;
 begin
+  // 第一步:检查计算结果是否为空（原逻辑保留）
   if (FMD5Hash = '') and (FSHA256Hash = '') then
   begin
-    ShowMessage('请先计算哈希值');
+    ShowStatus('请先计算哈希值', True); // 提示语更准确
     Exit;
   end;
 
+  // 第二步:检查验证输入框是否为空
+  verifyMD5Empty := Trim(edtVerifyMD5.Text) = '';
+  verifySHA256Empty := Trim(edtVerifySHA256.Text) = '';
+
+  // 两个输入框都空，提示并退出
+  if verifyMD5Empty and verifySHA256Empty then
+  begin
+    ShowStatus('请至少填写一个待验证的哈希值', True);
+    Exit;
+  end;
+
+  // 第三步:执行验证（原逻辑）
   UpdateVerifyStatus;
+  ShowStatus('验证完成');
 end;
 
 procedure TMainForm.btnClearClick(Sender: TObject);
 begin
+  // 停止线程
+  if Assigned(FHashThread) then
+  begin
+    FHashThread.Cancel;
+    FHashThread.WaitFor;
+    FHashThread.Free;
+    FHashThread := nil;
+  end;
+
+  // 清空所有
   edtFilePath.Text := '';
   edtVerifyMD5.Text := '';
   edtVerifySHA256.Text := '';
+
+  FFileName := '';
+  FFileSize := 0;
+  FFileDate := 0;
   FMD5Hash := '';
   FSHA256Hash := '';
-  lblMD5Result.Caption := '(未计算)';
-  lblSHA256Result.Caption := '(未计算)';
+
+  memoResult.Clear;
   lblMD5Status.Caption := '-';
   lblSHA256Status.Caption := '-';
-  lblMD5Status.Font.Color := clDefault;
-  lblSHA256Status.Font.Color := clDefault;
+  ProgressBar.Position := 0;
+
+  ShowStatus('就绪');
 end;
 
 procedure TMainForm.btnCopyHashClick(Sender: TObject);
 begin
-  if (FMD5Hash <> '') or (FSHA256Hash <> '')   then
+  if memoResult.Lines.Count > 2   then
   begin
-    Clipboard.AsText := 'MD5: '+ FMD5Hash + LineEnding + 'SHA-256: ' + FSHA256Hash;
-    showMessage('Hash结果已复制');
+    Clipboard.AsText := memoResult.Text;
+    ShowStatus('结果已复制到剪贴板');
   end
   else
-     ShowMessage('请先计算');
+     ShowStatus('请先计算, 无内容可复制', True);
 end;
 
 end.

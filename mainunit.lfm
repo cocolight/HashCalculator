@@ -1,12 +1,13 @@
 object MainForm: TMainForm
   Left = 589
-  Height = 636
+  Height = 717
   Top = 40
   Width = 777
-  Caption = 'MD5 & SHA-256 哈希计算器'
-  ClientHeight = 636
+  Caption = 'Hash 计算器'
+  ClientHeight = 717
   ClientWidth = 777
   DesignTimePPI = 168
+  Font.Height = -21
   Position = poScreenCenter
   LCLVersion = '4.4.0.0'
   object Panel2: TPanel
@@ -17,7 +18,7 @@ object MainForm: TMainForm
     Align = alTop
     ClientHeight = 82
     ClientWidth = 777
-    TabOrder = 2
+    TabOrder = 1
     object edtFilePath: TEdit
       Left = 16
       Height = 36
@@ -44,7 +45,7 @@ object MainForm: TMainForm
     Caption = '哈希设置'
     ClientHeight = 63
     ClientWidth = 773
-    TabOrder = 3
+    TabOrder = 2
     object chkUpperCase: TCheckBox
       Left = 16
       Height = 32
@@ -55,96 +56,121 @@ object MainForm: TMainForm
       State = cbChecked
       TabOrder = 0
     end
+    object chkMD5: TCheckBox
+      Left = 144
+      Height = 32
+      Top = 20
+      Width = 77
+      Caption = 'MD5'
+      Checked = True
+      State = cbChecked
+      TabOrder = 1
+    end
+    object chkSHA256: TCheckBox
+      Left = 237
+      Height = 32
+      Top = 20
+      Width = 116
+      Caption = 'SHA-256'
+      Checked = True
+      State = cbChecked
+      TabOrder = 2
+    end
   end
   object GroupBox2: TGroupBox
     Left = 0
-    Height = 166
+    Height = 302
     Top = 178
     Width = 777
     Align = alTop
     Caption = '计算结果'
-    ClientHeight = 133
+    ClientHeight = 269
     ClientWidth = 773
     TabOrder = 0
-    object lblMD5: TLabel
-      Left = 16
-      Height = 28
-      Top = 30
-      Width = 49
-      Caption = 'MD5'
-    end
-    object lblMD5Result: TLabel
-      Left = 124
-      Height = 28
-      Top = 30
-      Width = 526
-      AutoSize = False
-      Caption = '(未计算)'
-    end
-    object btnCopyMD5: TButton
-      Left = 688
-      Height = 44
-      Top = 24
-      Width = 76
-      Caption = 'copy'
+    object memoResult: TMemo
+      Left = 6
+      Height = 194
+      Top = 6
+      Width = 761
+      Align = alTop
+      BorderSpacing.Around = 6
+      Font.CharSet = ANSI_CHARSET
+      Font.Name = 'Consolas'
+      Font.Pitch = fpFixed
+      Font.Quality = fqDraft
+      ParentFont = False
+      ReadOnly = True
+      ScrollBars = ssAutoVertical
       TabOrder = 0
-      OnClick = btnCopyMD5Click
     end
-    object lblSHA256: TLabel
-      Left = 16
-      Height = 28
-      Top = 80
-      Width = 88
-      Caption = 'SHA-256'
-    end
-    object lblSHA256Result: TLabel
-      Left = 124
-      Height = 28
-      Top = 80
-      Width = 526
-      AutoSize = False
-      Caption = '(未计算)'
-    end
-    object btnCopySHA256: TButton
-      Left = 688
+    object btnCalculate: TButton
+      Left = 24
       Height = 44
-      Top = 74
-      Width = 76
-      Caption = 'copy'
+      Top = 208
+      Width = 100
+      Caption = '计算哈希'
       TabOrder = 1
-      OnClick = btnCopySHA256Click
+      OnClick = btnCalculateClick
+    end
+    object btnCopyHash: TButton
+      Left = 144
+      Height = 44
+      Top = 208
+      Width = 368
+      Caption = '复制结果'
+      TabOrder = 2
+      OnClick = btnCopyHashClick
+    end
+    object btnCancel: TButton
+      Left = 24
+      Height = 44
+      Top = 208
+      Width = 100
+      Caption = '取消'
+      TabOrder = 3
+      Visible = False
+      OnClick = btnCancelClick
+    end
+    object btnClear: TButton
+      Left = 528
+      Height = 44
+      Top = 208
+      Width = 220
+      Caption = '清空'
+      TabOrder = 4
+      OnClick = btnClearClick
     end
   end
   object GroupBox3: TGroupBox
     Left = 0
-    Height = 224
-    Top = 344
+    Height = 184
+    Top = 480
     Width = 777
     Align = alTop
     Caption = '哈希验证'
-    ClientHeight = 191
+    ClientHeight = 151
     ClientWidth = 773
-    TabOrder = 4
+    TabOrder = 3
     object lblVerifyMD5: TLabel
       Left = 16
       Height = 28
-      Top = 30
+      Top = 10
       Width = 49
       Caption = 'MD5'
     end
     object edtVerifyMD5: TEdit
       Left = 120
       Height = 36
-      Top = 30
-      Width = 480
+      Top = 10
+      Width = 560
       TabOrder = 0
     end
     object lblMD5Status: TLabel
-      Left = 620
+      Left = 688
       Height = 31
-      Top = 30
-      Width = 10
-      Caption = '-'
+      Top = 10
+      Width = 80
+      AutoSize = False
       Font.Height = -23
       Font.Style = [fsBold]
       ParentFont = False
@@ -152,23 +178,23 @@ object MainForm: TMainForm
     object lblVerifySHA256: TLabel
       Left = 16
       Height = 28
-      Top = 80
+      Top = 54
       Width = 88
       Caption = 'SHA-256'
     end
     object edtVerifySHA256: TEdit
       Left = 120
       Height = 36
-      Top = 74
-      Width = 480
+      Top = 50
+      Width = 560
       TabOrder = 1
     end
     object lblSHA256Status: TLabel
-      Left = 620
+      Left = 688
       Height = 31
-      Top = 74
-      Width = 10
-      Caption = '-'
+      Top = 48
+      Width = 80
+      AutoSize = False
       Font.Height = -23
       Font.Style = [fsBold]
       ParentFont = False
@@ -176,52 +202,34 @@ object MainForm: TMainForm
     object btnVerify: TButton
       Left = 16
       Height = 44
-      Top = 128
+      Top = 100
       Width = 737
       Caption = '验证'
       TabOrder = 2
       OnClick = btnVerifyClick
     end
   end
-  object Panel1: TPanel
+  object ProgressBar: TProgressBar
     Left = 0
-    Height = 70
-    Top = 566
+    Height = 20
+    Top = 669
     Width = 777
     Align = alBottom
-    ClientHeight = 70
-    ClientWidth = 777
-    TabOrder = 1
-    object btnCalculate: TButton
-      Left = 150
-      Height = 44
-      Top = 10
-      Width = 100
-      Caption = '计算哈希'
-      TabOrder = 0
-      OnClick = btnCalculateClick
-    end
-    object btnCopyHash: TButton
-      Left = 315
-      Height = 44
-      Top = 8
-      Width = 100
-      Caption = '复制结果'
-      TabOrder = 1
-      OnClick = btnCopyHashClick
-    end
-    object btnClear: TButton
-      Left = 482
-      Height = 44
-      Top = 10
-      Width = 100
-      Caption = '清空'
-      TabOrder = 2
-      OnClick = btnClearClick
-    end
+    TabOrder = 4
+  end
+  object lblStatus: TLabel
+    Left = 8
+    Height = 28
+    Top = 689
+    Width = 761
+    Align = alBottom
+    AutoSize = False
+    BorderSpacing.Left = 8
+    BorderSpacing.Right = 8
+    Caption = '状态: 就绪'
   end
   object OpenDialog: TOpenDialog
-    Left = 32
-    Top = 576
+    Left = 712
+    Top = 120
   end
 end
