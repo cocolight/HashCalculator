@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<CONFIG>
-  <Compiler Value="C:\Software\lazarus\fpc\3.2.2\bin\x86_64-win64\fpc.exe" Date="1533567158"/>
-  <Params Value="-MObjFPC -Scghi -CX -O4 -Xs -XX -WG -l -vewnhibq -FiC:\Users\yun\Documents\lazarus\HashCalculator\lib\x86_64-win64 -FuC:\Users\yun\Documents\lazarus\HashCalculator\ -FuC:\Software\lazarus\lcl\units\x86_64-win64\win32 -FuC:\Software\lazarus\lcl\units\x86_64-win64 -FuC:\Software\lazarus\components\freetype\lib\x86_64-win64 -FuC:\Software\lazarus\components\lazutils\lib\x86_64-win64 -FuC:\Users\yun\AppData\Local\lazarus\onlinepackagemanager\packages\DCPcrypt\lib\x86_64-win64 -FuC:\Software\lazarus\packager\units\x86_64-win64 -FUC:\Users\yun\Documents\lazarus\HashCalculator\lib\x86_64-win64\ -FEC:\Users\yun\Documents\lazarus\HashCalculator\ -oC:\Users\yun\Documents\lazarus\HashCalculator\HashCalculator.exe -dLCL -dLCLwin32 HashCalculator.lpr"/>
-</CONFIG>
