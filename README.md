@@ -26,7 +26,8 @@
 3. 打开项目文件（`.lpi`），选择对应平台（Windows/Linux/macOS），点击「运行」或「编译」即可生成可执行文件。
 
 ## 🎨 界面预览
-<img width="777" height="767" alt="image" src="https://github.com/user-attachments/assets/1167bc77-b566-4f2f-a185-efdf78e7cd78" />
+<img width="660" height="470" alt="image" src="https://github.com/user-attachments/assets/6474364e-53af-4d65-be95-7103ccea4fea" />
+
 
 
 > 主界面分为「文件选择区」「哈希类型选择区」「结果展示区」三部分，控件布局紧凑且不拥挤，操作流程一键直达。
