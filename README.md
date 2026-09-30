@@ -1,40 +1,67 @@
 # HashCalculator
-一款基于 Lazarus 开发的轻量级哈希值计算工具，支持 MD5、SHA256 二种主流哈希算法，界面简洁美观、操作便捷，可快速计算任意文件的哈希值，适用于文件完整性校验、数据验证等场景。
 
-## ✨ 功能特点
-- **多算法支持**：覆盖 MD5、SHA256 二种常用哈希算法，满足日常校验需求；
-- **现代化界面**：原生界面设计风格，分区清晰，配色舒适，操作流程直观；
-- **实时进度显示**：计算大文件时展示进度条，避免程序无响应的视觉误区；
-- **友好交互**：操作前校验文件路径、计算完成/出错给出明确提示，防止误操作；
-- **结果保护**：哈希结果区域只读，避免手动修改导致的结果错误；
-- **跨平台潜力**：基于 Lazarus/LCL 开发，可编译为 Windows/Linux/macOS 多平台版本。
+A lightweight, cross-platform MD5/SHA-256 hash calculator built with **Rust + egui**.
 
-## 📥 运行环境
-- **Windows**：Windows 7/8/10/11（32/64 位），无需安装额外运行库；
-- **Linux/macOS**：需安装 Lazarus 运行时依赖（LCL 库），或直接使用编译后的对应平台可执行文件。
+Supports memory-mapped file reading, async computation with progress bar, hash verification, and one-click clipboard copy.
 
-## 🚀 使用说明
-1. 启动程序后，点击「选择文件」按钮，选中需要计算哈希值的目标文件；
-2. 在「哈希类型」下拉框中选择需要计算的算法（默认 MD5）；
-3. 点击「开始计算」按钮，等待进度条完成后，结果会自动显示在「计算结果」区域；
-4. 可直接复制结果区域的哈希值，用于文件校验或其他验证场景。
+轻量级哈希值计算工具，基于 Rust + egui 构建，支持 MD5/SHA-256，内存映射读取、异步进度、哈希校验与一键复制。
 
-## 🛠️ 编译说明
-若需自行编译源码，需满足以下条件：
-1. 安装最新版 [Lazarus IDE](https://www.lazarus-ide.org/)；
-2. 确保项目已引入 `sha256`、`md5` 等哈希相关单元；
-3. 打开项目文件（`.lpi`），选择对应平台（Windows/Linux/macOS），点击「运行」或「编译」即可生成可执行文件。
+## Features
 
-## 🎨 界面预览
-<img width="660" height="470" alt="image" src="https://github.com/user-attachments/assets/6474364e-53af-4d65-be95-7103ccea4fea" />
+- **Algorithms**: MD5 + SHA-256 computed in parallel in a background thread.
+- **Memory-mapped I/O**: large files are streamed via `memmap2`, avoiding full-file load.
+- **Async progress**: live progress bar with current/total size, no UI freeze.
+- **Cancellation**: stop a running computation at any time.
+- **Hash verification**: paste an expected MD5/SHA-256 and get ✓/✗ instantly.
+- **Read-only result**: result panel cannot be edited accidentally.
+- **Cross-platform**: pure Rust, builds for Windows / Linux / macOS.
 
+## Usage
 
+1. Click **浏览...** to pick a file.
+2. Toggle **大写字母** if you want uppercase hex (default on).
+3. Click **计算哈希**; the progress bar and status line update in real time.
+4. Click **复制结果** to copy filename / size / mtime / MD5 / SHA-256.
+5. In **哈希验证**, paste expected values and click **验证** to compare.
 
-> 主界面分为「文件选择区」「哈希类型选择区」「结果展示区」三部分，控件布局紧凑且不拥挤，操作流程一键直达。
+## Build
 
-## 📄 许可证
-本项目为开源工具，仅供个人学习、非商业使用，二次分发或修改请保留原作者信息。
+```bash
+# debug
+cargo run
 
-## 💡 常见问题
-1. **计算失败提示「文件不存在」**：检查所选文件路径是否正确，或文件是否被其他程序占用；
-2. **大文件计算卡顿**：程序已做分块读取优化，卡顿多为文件本身过大或磁盘读写速度限制，耐心等待即可；
+# release (smaller binary)
+cargo build --release
+```
+
+Requires a recent stable Rust toolchain (tested with 1.98). On Windows, the MSVC toolchain is used by default.
+
+## Project Layout
+
+```
+src/
+  main.rs      # entry, creates the eframe window
+  app.rs       # HashApp: egui immediate-mode UI + state
+  worker.rs    # background thread: memmap + MD5/SHA-256, channel progress
+  format.rs    # helpers: file size / time formatting
+Cargo.toml
+```
+
+## Dependencies
+
+| crate     | purpose                          |
+| --------- | -------------------------------- |
+| eframe    | egui native window host          |
+| egui      | immediate-mode GUI              |
+| rfd       | native file dialog              |
+| memmap2   | cross-platform memory-mapped IO |
+| md-5      | MD5 (RustCrypto)                 |
+| sha2      | SHA-256 (RustCrypto)             |
+| arboard   | clipboard copy                   |
+| chrono    | modification-time formatting     |
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).
+
+Copyright (c) cocolight.
