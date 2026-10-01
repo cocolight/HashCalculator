@@ -10,7 +10,17 @@ keywords = ["hash", "md5", "sha256", "egui", "calculator"]
 categories = ["cryptography", "gui"]
 
 [dependencies]
-eframe = "0.36"
+# 显式关闭默认 feature：eframe 0.36 的 `default` 携带的是 `wgpu` 后端，
+# 而 wgpu 在空载时就要拉起 DX12/Vulkan 运行时与 GPU 资源池（实测 private 内存 250MB+）。
+# 换成 `glow`（OpenGL）后端后同场景内存大幅下降，对这类轻量工具是纯收益。
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "links",
+    "glow",
+    "wayland",
+    "x11",
+] }
 egui = "0.36"
 rfd = "0.17"
 memmap2 = "0.9"
