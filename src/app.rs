@@ -49,6 +49,17 @@ impl RowStatus {
             RowStatus::Error(e) => (format!("失败: {e}"), Color32::RED),
         }
     }
+
+    /// 导出到 CSV/TXT 时写入的纯文本状态。
+    fn as_text(&self) -> String {
+        match self {
+            RowStatus::Pending => "待计算".to_string(),
+            RowStatus::Running => "计算中".to_string(),
+            RowStatus::Done => "完成".to_string(),
+            RowStatus::Cancelled => "已取消".to_string(),
+            RowStatus::Error(e) => format!("失败: {e}"),
+        }
+    }
 }
 
 /// 批量列表中的一行。
@@ -717,6 +728,84 @@ impl HashApp {
         }
     }
 
+    /// 导出/复制的取行规则：**有勾选则取勾选行，无勾选则取全部行**。
+    fn batch_target_rows(&self) -> Vec<usize> {
+        let any_selected = self.batch.rows.iter().any(|r| r.selected);
+        self.batch
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !any_selected || r.selected)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 把要导出/复制的行转换成与 UI 解耦的导出结构。
+    fn batch_export_rows(&self) -> Vec<batch::ExportRow> {
+        self.batch_target_rows()
+            .into_iter()
+            .map(|i| {
+                let r = &self.batch.rows[i];
+                batch::ExportRow {
+                    name: r.name.clone(),
+                    path: r.path_display.clone(),
+                    size: r.size,
+                    md5: r.md5.clone(),
+                    sha256: r.sha256.clone(),
+                    status: r.status.as_text(),
+                    elapsed_ms: r.elapsed_ms,
+                }
+            })
+            .collect()
+    }
+
+    /// 导出结果到 CSV（`csv = true`）或 TXT。
+    fn batch_export(&mut self, csv: bool) {
+        let rows = self.batch_export_rows();
+        if rows.is_empty() {
+            self.batch.set_status("没有可导出的行", true);
+            return;
+        }
+        let ext = if csv { "csv" } else { "txt" };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("导出结果")
+            .set_file_name(format!("hashes.{ext}"))
+            .save_file()
+        else {
+            return;
+        };
+
+        let content = if csv {
+            batch::to_csv(&rows)
+        } else {
+            batch::to_txt(&rows)
+        };
+        match std::fs::write(&path, content.as_bytes()) {
+            Ok(_) => {
+                let msg = format!("已导出 {} 行 → {}", rows.len(), path.display());
+                self.batch.set_status(&msg, false);
+            }
+            Err(e) => self.batch.set_status(&format!("导出失败: {e}"), true),
+        }
+    }
+
+    /// 复制选中行（TSV）到剪贴板。
+    fn batch_copy_rows(&mut self) {
+        let rows = self.batch_export_rows();
+        if rows.is_empty() {
+            self.batch.set_status("没有可复制的行", true);
+            return;
+        }
+        let text = batch::to_tsv(&rows);
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(_) => {
+                let msg = format!("已复制 {} 行到剪贴板", rows.len());
+                self.batch.set_status(&msg, false);
+            }
+            Err(e) => self.batch.set_status(&format!("复制失败: {e}"), true),
+        }
+    }
+
     /// 单文件页。
     fn ui_single(&mut self, ui: &mut egui::Ui) {
         // === 文件选择区 ===
@@ -858,6 +947,36 @@ impl HashApp {
             ui.checkbox(&mut self.upper_case, "大写字母");
         });
 
+        // === 导出与复制 ===
+        ui.horizontal(|ui| {
+            let can_export = n > 0 && !self.batch.running;
+            if ui
+                .add_enabled(can_export, egui::Button::new("导出 CSV"))
+                .on_hover_text("带 UTF-8 BOM，Excel 打开中文不乱码")
+                .clicked()
+            {
+                self.batch_export(true);
+            }
+            if ui
+                .add_enabled(can_export, egui::Button::new("导出 TXT"))
+                .clicked()
+            {
+                self.batch_export(false);
+            }
+            if ui
+                .add_enabled(can_export, egui::Button::new("复制选中"))
+                .on_hover_text("制表符分隔，可直接粘进表格")
+                .clicked()
+            {
+                self.batch_copy_rows();
+            }
+            ui.label(if selected > 0 {
+                format!("→ 已勾选 {selected} 行")
+            } else {
+                "→ 未勾选，导出/复制全部行".to_string()
+            });
+        });
+
         ui.separator();
 
         // === 结果表格（虚拟化：只渲染可见行）===
@@ -872,7 +991,7 @@ impl HashApp {
                 .max(ui.text_style_height(&egui::TextStyle::Body));
 
             // 表头也占一行，故总行数为 n + 1；两者共用同一套行号，striped 才能对齐
-            let table_h = (ui.available_height() - 78.0).max(100.0);
+            let table_h = (ui.available_height() - 110.0).max(100.0);
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .max_height(table_h)
@@ -885,7 +1004,14 @@ impl HashApp {
                             for row in range {
                                 if row == 0 {
                                     for h in [
-                                        "选", "文件名", "路径", "大小", "MD5", "SHA-256", "状态", "耗时",
+                                        "选",
+                                        "文件名",
+                                        "路径",
+                                        "大小",
+                                        "MD5",
+                                        "SHA-256",
+                                        "状态",
+                                        "耗时",
                                     ] {
                                         ui.label(RichText::new(h).strong());
                                     }
