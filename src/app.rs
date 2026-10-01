@@ -64,6 +64,9 @@ impl RowStatus {
 
 /// 批量列表中的一行。
 struct BatchRow {
+    /// `canonicalize` 后的去重键。删除该行时必须同步把它从 `seen` 移除，
+    /// 否则同一文件被删掉后再想加回来会被误判为重复。
+    key: PathBuf,
     path: PathBuf,
     name: String,
     path_display: String,
@@ -82,6 +85,9 @@ struct BatchState {
     seen: HashSet<PathBuf>,
     /// 批量消息里的下标 → `rows` 下标；每轮「开始」时按只提交未完成行重建。
     index_map: Vec<usize>,
+    /// 本轮实际提交的行下标。进度条以它的长度作分母，
+    /// 这样「只算勾选」时进度也能走到 100%。
+    round_rows: Vec<usize>,
     /// 当前正在计算的行下标。
     current: Option<usize>,
     /// 当前文件的进度（0..=1）。
@@ -99,6 +105,7 @@ impl BatchState {
             rows: Vec::new(),
             seen: HashSet::new(),
             index_map: Vec::new(),
+            round_rows: Vec::new(),
             current: None,
             file_progress: 0.0,
             running: false,
@@ -534,7 +541,7 @@ impl HashApp {
     /// 把一个路径加入批量列表；返回是否真的加入（重复返回 false）。
     fn batch_push_path(&mut self, path: PathBuf) -> bool {
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        if !self.batch.seen.insert(key) {
+        if !self.batch.seen.insert(key.clone()) {
             return false;
         }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -544,6 +551,7 @@ impl HashApp {
             .unwrap_or_default();
         let path_display = path.to_string_lossy().to_string();
         self.batch.rows.push(BatchRow {
+            key,
             path,
             name,
             path_display,
@@ -565,9 +573,43 @@ impl HashApp {
         self.batch.rows.clear();
         self.batch.seen.clear();
         self.batch.index_map.clear();
+        self.batch.round_rows.clear();
         self.batch.current = None;
         self.batch.file_progress = 0.0;
         self.batch.set_status("就绪", false);
+    }
+
+    /// 删除所有勾选行，并把这些文件的去重键从 `seen` 中移除（否则删掉后无法再加回来）。
+    ///
+    /// 只在空闲时可调用：运行中后台消息正按 `index_map` 定位行，删除会打乱下标映射。
+    fn batch_delete_selected(&mut self) {
+        if self.batch.running {
+            return;
+        }
+        let keys: Vec<PathBuf> = self
+            .batch
+            .rows
+            .iter()
+            .filter(|r| r.selected)
+            .map(|r| r.key.clone())
+            .collect();
+        if keys.is_empty() {
+            self.batch.set_status("没有勾选的行", true);
+            return;
+        }
+        for k in &keys {
+            self.batch.seen.remove(k);
+        }
+        let removed = keys.len();
+        self.batch.rows.retain(|r| !r.selected);
+        // 下标体系整体失效，一并清掉，避免留下悬空引用
+        self.batch.index_map.clear();
+        self.batch.round_rows.clear();
+        self.batch.current = None;
+        self.batch.file_progress = 0.0;
+        let left = self.batch.rows.len();
+        self.batch
+            .set_status(&format!("已删除 {removed} 行，剩余 {left} 行"), false);
     }
 
     /// 开始批量计算。只提交**尚未完成**的行，因此取消后可再次「开始」续算。
@@ -910,8 +952,8 @@ impl HashApp {
     /// 批量页。
     fn ui_batch(&mut self, ui: &mut egui::Ui) {
         let idle = !self.batch.running;
-        let n = self.batch.rows.len();
-        let selected = self.batch.rows.iter().filter(|r| r.selected).count();
+        // 注意：工具栏按钮会改动 `rows`（清空 / 删除勾选），所以行数快照必须等它们
+        // 全部处理完再取。否则同一帧内会拿着旧长度去索引已经被清空的表 —— 直接 panic。
 
         // === 来源与运行控制 ===
         ui.horizontal(|ui| {
@@ -932,20 +974,50 @@ impl HashApp {
             if ui.add_enabled(idle, egui::Button::new("清空")).clicked() {
                 self.batch_clear();
             }
+            let sel_now = self.batch.rows.iter().filter(|r| r.selected).count();
+            let del_label = if sel_now > 0 {
+                format!("删除勾选 ({sel_now})")
+            } else {
+                "删除勾选".to_string()
+            };
+            if ui
+                .add_enabled(idle && sel_now > 0, egui::Button::new(del_label))
+                .on_hover_text("把勾选的行从列表中移除")
+                .clicked()
+            {
+                self.batch_delete_selected();
+            }
             ui.separator();
             if self.batch.running {
                 if ui.button("取消").clicked() {
                     self.batch_cancel();
                 }
-            } else if ui
-                .add_enabled(!self.batch.rows.is_empty(), egui::Button::new("开始计算"))
-                .clicked()
-            {
-                self.batch_start();
+            } else {
+                let start_label = if sel_now > 0 {
+                    format!("计算勾选 ({sel_now})")
+                } else {
+                    "开始计算".to_string()
+                };
+                let tip = if sel_now > 0 {
+                    "只计算勾选的行"
+                } else {
+                    "计算全部尚未完成的行"
+                };
+                if ui
+                    .add_enabled(!self.batch.rows.is_empty(), egui::Button::new(start_label))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.batch_start();
+                }
             }
             ui.separator();
             ui.checkbox(&mut self.upper_case, "大写字母");
         });
+
+        // 工具栏处理完毕，此时 rows 已是本帧最终状态，再取快照
+        let n = self.batch.rows.len();
+        let selected = self.batch.rows.iter().filter(|r| r.selected).count();
 
         // === 导出与复制 ===
         ui.horizontal(|ui| {
@@ -1019,7 +1091,11 @@ impl HashApp {
                                     continue;
                                 }
 
-                                let r = &mut self.batch.rows[row - 1];
+                                // 防御性索引：即便将来有别的路径在同一帧改动 rows，也只是少画一行而不会崩
+                                let Some(r) = self.batch.rows.get_mut(row - 1) else {
+                                    ui.end_row();
+                                    continue;
+                                };
                                 ui.checkbox(&mut r.selected, "");
                                 ui.add_sized(
                                     [180.0, row_h],
