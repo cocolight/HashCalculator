@@ -33,7 +33,56 @@ pub struct HashApp {
 }
 
 impl HashApp {
-    pub fn new(_cc: &eframe::CreationContext) -> Self {
+    /// 注册系统中文字体到 egui，否则 CJK 字符渲染为方框（tofu）。
+    /// 按优先级探测常见系统 CJK 字体（Windows > Linux > macOS）。
+    fn install_cjk_fonts(ctx: &egui::Context) {
+        const CANDIDATES: &[&str] = &[
+            // Windows
+            r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑
+            r"C:\Windows\Fonts\msyh.ttf",
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simhei.ttf", // 黑体
+            r"C:\Windows\Fonts\simsun.ttc", // 宋体
+            // Linux（主流发行版 Noto/文泉驿）
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            // macOS
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+        ];
+
+        let mut font_data: Vec<(String, Vec<u8>)> = Vec::new();
+        for (i, path) in CANDIDATES.iter().enumerate() {
+            if let Ok(bytes) = std::fs::read(path) {
+                font_data.push((format!("cjk_{i}"), bytes));
+                break;
+            }
+        }
+
+        if font_data.is_empty() {
+            return; // 未找到系统 CJK 字体，维持默认（仅英文可用）
+        }
+
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, bytes) in font_data {
+            fonts.font_data.insert(
+                name.clone(),
+                egui::FontData::from_owned(bytes).into(),
+            );
+            // 追加到 Proportional 与 Monospace 的回退链末尾：
+            // ASCII 仍用默认字体渲染，CJK 落到中文字体
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                if let Some(list) = fonts.families.get_mut(&family) {
+                    list.push(name.clone());
+                }
+            }
+        }
+        ctx.set_fonts(fonts);
+    }
+
+    pub fn new(cc: &eframe::CreationContext) -> Self {
+        Self::install_cjk_fonts(&cc.egui_ctx);
         Self {
             file_path: String::new(),
             file_name: String::new(),
