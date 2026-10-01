@@ -1,5 +1,3 @@
-性能优化方案 → [docs/perf-plan.md](docs/perf-plan.md)
-
 # HashCalculator
 
 A lightweight, cross-platform MD5/SHA-256 hash calculator built with **Rust + egui**.
@@ -46,6 +44,8 @@ src/
   app.rs       # HashApp: egui immediate-mode UI + state
   worker.rs    # background thread: memmap + MD5/SHA-256, channel progress
   format.rs    # helpers: file size / time formatting
+docs/
+  perf-plan.md # large-file performance notes
 Cargo.toml
 ```
 
