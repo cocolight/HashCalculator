@@ -11,7 +11,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -52,14 +51,22 @@ impl WorkerHandle {
     }
 }
 
-enum WorkerError {
+/// 单文件哈希结果。
+pub(crate) struct HashOutcome {
+    pub(crate) md5: String,
+    pub(crate) sha256: String,
+    pub(crate) elapsed_ms: u128,
+}
+
+/// 哈希计算错误。
+pub(crate) enum HashError {
     Cancelled,
     Other(String),
 }
 
-impl From<std::io::Error> for WorkerError {
+impl From<std::io::Error> for HashError {
     fn from(e: std::io::Error) -> Self {
-        WorkerError::Other(e.to_string())
+        HashError::Other(e.to_string())
     }
 }
 
@@ -70,15 +77,20 @@ pub fn spawn(path: PathBuf, upper: bool) -> (WorkerHandle, mpsc::Receiver<Worker
     let cancel_clone = cancel.clone();
 
     thread::spawn(move || {
-        let result = compute(&path, upper, &cancel_clone, &tx);
-        let msg = match result {
-            Ok((md5, sha256, elapsed_ms)) => WorkerMsg::Done {
-                md5,
-                sha256,
-                elapsed_ms,
-            },
-            Err(WorkerError::Cancelled) => WorkerMsg::Cancelled,
-            Err(WorkerError::Other(e)) => WorkerMsg::Error(e),
+        // 进度回调借用 tx，作用域结束后再发送终态消息
+        let msg = {
+            let mut on_progress = |current: u64, total: u64| {
+                let _ = tx.send(WorkerMsg::Progress { current, total });
+            };
+            match hash_file(&path, upper, &cancel_clone, &mut on_progress) {
+                Ok(outcome) => WorkerMsg::Done {
+                    md5: outcome.md5,
+                    sha256: outcome.sha256,
+                    elapsed_ms: outcome.elapsed_ms,
+                },
+                Err(HashError::Cancelled) => WorkerMsg::Cancelled,
+                Err(HashError::Other(e)) => WorkerMsg::Error(e),
+            }
         };
         let _ = tx.send(msg);
     });
@@ -86,12 +98,17 @@ pub fn spawn(path: PathBuf, upper: bool) -> (WorkerHandle, mpsc::Receiver<Worker
     (WorkerHandle { cancel }, rx)
 }
 
-fn compute(
+/// 计算单个文件的 MD5 与 SHA-256。
+///
+/// 与 UI 无关：进度经 `progress(current, total)` 回调上报（在 `hash_parallel` 中
+/// 按 `PROGRESS_INTERVAL` 节流），取消经 `cancel` 协作式生效。单文件与批量计算
+/// 共用本函数，避免出现第二套会与生产路径漂移的实现。
+pub(crate) fn hash_file(
     path: &Path,
     upper: bool,
     cancel: &AtomicBool,
-    tx: &Sender<WorkerMsg>,
-) -> Result<(String, String, u128), WorkerError> {
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<HashOutcome, HashError> {
     let start = Instant::now();
 
     let file = std::fs::File::open(path)?;
@@ -103,23 +120,23 @@ fn compute(
     let mmap = unsafe { Mmap::map(&file) }?;
 
     // 初始进度
-    let _ = tx.send(WorkerMsg::Progress { current: 0, total });
+    progress(0, total);
 
-    let (md5_hex, sha256_hex) = hash_parallel(&mmap, total, cancel, tx)?;
+    let (md5_hex, sha256_hex) = hash_parallel(&mmap, total, cancel, progress)?;
 
-    let md5_result = if upper {
-        md5_hex.to_uppercase()
-    } else {
-        md5_hex
-    };
-    let sha256_result = if upper {
-        sha256_hex.to_uppercase()
-    } else {
-        sha256_hex
-    };
-
-    let elapsed_ms = start.elapsed().as_millis();
-    Ok((md5_result, sha256_result, elapsed_ms))
+    Ok(HashOutcome {
+        md5: if upper {
+            md5_hex.to_uppercase()
+        } else {
+            md5_hex
+        },
+        sha256: if upper {
+            sha256_hex.to_uppercase()
+        } else {
+            sha256_hex
+        },
+        elapsed_ms: start.elapsed().as_millis(),
+    })
 }
 
 /// 双线程并行：MD5 与 SHA-256 各自遍历同一份 mmap，各占一核。
@@ -127,8 +144,8 @@ fn hash_parallel(
     mmap: &[u8],
     total: u64,
     cancel: &AtomicBool,
-    tx: &Sender<WorkerMsg>,
-) -> Result<(String, String), WorkerError> {
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(String, String), HashError> {
     let md5_done = AtomicU64::new(0);
     let sha_done = AtomicU64::new(0);
 
@@ -162,10 +179,7 @@ fn hash_parallel(
                 .load(Ordering::Relaxed)
                 .min(sha_done.load(Ordering::Relaxed));
             if last_sent.elapsed() >= PROGRESS_INTERVAL {
-                let _ = tx.send(WorkerMsg::Progress {
-                    current: cur,
-                    total,
-                });
+                progress(cur, total);
                 last_sent = Instant::now();
             }
             thread::sleep(POLL_INTERVAL);
@@ -177,17 +191,14 @@ fn hash_parallel(
     });
 
     if cancel.load(Ordering::Relaxed) {
-        return Err(WorkerError::Cancelled);
+        return Err(HashError::Cancelled);
     }
     if !md5_ok || !sha_ok {
-        return Err(WorkerError::Other("计算线程异常终止".into()));
+        return Err(HashError::Other("计算线程异常终止".into()));
     }
 
     // 收尾进度，确保进度条走到 100%
-    let _ = tx.send(WorkerMsg::Progress {
-        current: total,
-        total,
-    });
+    progress(total, total);
     Ok((md5_hex, sha_hex))
 }
 
