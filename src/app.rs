@@ -126,14 +126,25 @@ impl BatchState {
         self.rows.iter().filter(|r| r.status.is_terminal()).count()
     }
 
-    /// 整批进度（0..=1）：已完成行数 + 当前文件进度。
-    fn overall_progress(&self) -> f32 {
-        let n = self.rows.len();
+    /// 本轮中已进入终态的行数。
+    fn round_done(&self) -> usize {
+        self.round_rows
+            .iter()
+            .filter(|&&i| self.rows.get(i).is_some_and(|r| r.status.is_terminal()))
+            .count()
+    }
+
+    /// 本轮进度（0..=1）：本轮已完成行数 + 当前文件进度。
+    ///
+    /// 分母是**本轮提交的行数**而非列表总行数 —— 只算勾选那几行时，
+    /// 用总行数作分母会让进度条永远停在半路。
+    fn round_progress(&self) -> f32 {
+        let n = self.round_rows.len();
         if n == 0 {
             return 0.0;
         }
         let cur = if self.running { self.file_progress } else { 0.0 };
-        ((self.terminal_count() as f32 + cur) / n as f32).clamp(0.0, 1.0)
+        ((self.round_done() as f32 + cur) / n as f32).clamp(0.0, 1.0)
     }
 }
 
@@ -622,16 +633,21 @@ impl HashApp {
             return;
         }
 
-        let targets: Vec<usize> = self
-            .batch
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.status != RowStatus::Done)
-            .map(|(i, _)| i)
+        // 取行规则与导出/复制共用同一个 `batch::pick_indices`：
+        // 有勾选就只算勾选的行，无勾选才算全部；再滤掉已经完成的。
+        let flags: Vec<bool> = self.batch.rows.iter().map(|r| r.selected).collect();
+        let any_selected = flags.iter().any(|&s| s);
+        let targets: Vec<usize> = batch::pick_indices(&flags)
+            .into_iter()
+            .filter(|&i| self.batch.rows[i].status != RowStatus::Done)
             .collect();
         if targets.is_empty() {
-            self.batch.set_status("全部文件均已完成", false);
+            let msg = if any_selected {
+                "勾选的文件均已完成"
+            } else {
+                "全部文件均已完成"
+            };
+            self.batch.set_status(msg, false);
             return;
         }
 
@@ -652,6 +668,7 @@ impl HashApp {
         }
 
         let (handle, rx) = batch::spawn_batch(items, self.upper_case);
+        self.batch.round_rows = targets.clone();
         self.batch.index_map = targets;
         self.batch.handle = Some(handle);
         self.batch.rx = Some(rx);
@@ -772,14 +789,8 @@ impl HashApp {
 
     /// 导出/复制的取行规则：**有勾选则取勾选行，无勾选则取全部行**。
     fn batch_target_rows(&self) -> Vec<usize> {
-        let any_selected = self.batch.rows.iter().any(|r| r.selected);
-        self.batch
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| !any_selected || r.selected)
-            .map(|(i, _)| i)
-            .collect()
+        let flags: Vec<bool> = self.batch.rows.iter().map(|r| r.selected).collect();
+        batch::pick_indices(&flags)
     }
 
     /// 把要导出/复制的行转换成与 UI 解耦的导出结构。
@@ -1138,14 +1149,23 @@ impl HashApp {
         ui.separator();
 
         // === 进度与状态 ===
+        let done_total = self.batch.terminal_count();
+        let selected_now = self.batch.rows.iter().filter(|r| r.selected).count();
         ui.horizontal(|ui| {
             ui.label(format!(
-                "共 {n} 个文件 | 已完成 {} | 已勾选 {selected}",
-                self.batch.terminal_count()
+                "共 {n} 个文件 | 已完成 {done_total} | 已勾选 {selected_now}"
             ));
+            if !self.batch.round_rows.is_empty() {
+                ui.separator();
+                ui.label(format!(
+                    "本轮 {}/{}",
+                    self.batch.round_done(),
+                    self.batch.round_rows.len()
+                ));
+            }
         });
         ui.add(
-            egui::ProgressBar::new(self.batch.overall_progress())
+            egui::ProgressBar::new(self.batch.round_progress())
                 .show_percentage()
                 .desired_width(f32::INFINITY),
         );

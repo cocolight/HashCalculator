@@ -139,6 +139,20 @@ pub fn spawn_batch(items: Vec<BatchItem>, upper: bool) -> (BatchHandle, mpsc::Re
     (BatchHandle { cancel }, rx)
 }
 
+/// 从一组勾选状态里挑出要处理的行下标。
+///
+/// 规则：**只要有任意一行被勾选，就只处理勾选的行；否则处理全部行。**
+/// 计算与导出/复制共用这一条规则，集中在此以免两处实现各自漂移。
+pub fn pick_indices(selected: &[bool]) -> Vec<usize> {
+    let any_selected = selected.iter().any(|&s| s);
+    selected
+        .iter()
+        .enumerate()
+        .filter(|(_, &s)| !any_selected || s)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// 导出用的一行（与 UI 状态解耦，便于本模块独立测试）。
 pub struct ExportRow {
     pub name: String,
@@ -230,6 +244,16 @@ fn dash_if_empty(s: &str) -> &str {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn pick_indices_prefers_selection_when_any_row_is_checked() {
+        assert_eq!(pick_indices(&[]), Vec::<usize>::new());
+        // 一个都没勾 → 全部行
+        assert_eq!(pick_indices(&[false, false]), vec![0, 1]);
+        // 只要勾了一个 → 只取勾选的
+        assert_eq!(pick_indices(&[true, false, true]), vec![0, 2]);
+        assert_eq!(pick_indices(&[false, true]), vec![1]);
+    }
 
     #[test]
     fn csv_field_passes_through_plain_text() {
