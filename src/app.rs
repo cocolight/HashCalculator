@@ -137,7 +137,7 @@ impl HashApp {
         self.set_status("已选择文件", false);
     }
 
-    fn start_calc(&mut self, ctx: &egui::Context) {
+    fn start_calc(&mut self) {
         if self.file_path.is_empty() {
             self.set_status("请选择文件", true);
             return;
@@ -147,7 +147,7 @@ impl HashApp {
             self.set_status("文件不存在", true);
             return;
         }
-        let (handle, rx) = worker::spawn(path, self.upper_case, ctx.clone());
+        let (handle, rx) = worker::spawn(path, self.upper_case);
         self.worker = Some(handle);
         self.rx = Some(rx);
         self.md5_result.clear();
@@ -337,7 +337,6 @@ impl eframe::App for HashApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
         egui::CentralPanel::default().show(ui, |ui| {
             // === 文件选择区 ===
             ui.horizontal(|ui| {
@@ -377,7 +376,7 @@ impl eframe::App for HashApp {
                         self.cancel_calc();
                     }
                 } else if ui.button("计算哈希").clicked() {
-                    self.start_calc(&ctx);
+                    self.start_calc();
                 }
                 if ui.button("复制结果").clicked() && !self.is_calculating() {
                     self.copy_result();

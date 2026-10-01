@@ -1,16 +1,25 @@
-//! 后台哈希计算工作线程：内存映射文件 + MD5/SHA-256 并行计算，
+//! 后台哈希计算工作线程：内存映射文件 + MD5/SHA-256 计算，
 //! 通过 channel 向 UI 线程推送进度与结果，支持取消。
+//!
+//! 本模块不依赖 egui：UI 侧在计算期间每帧 `request_repaint()`，进度消息由
+//! `app::HashApp::poll_worker` 在主线程消费，因此工作线程无需（也不应）触碰 ctx。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc::Sender, Arc};
 use std::sync::mpsc;
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use egui::Context;
 use md5::Digest;
 use memmap2::Mmap;
+
+/// 进度推送节流：最多约 10 次/秒，避免 UI 线程被消息淹没。
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// 处理粒度：既决定循环开销，也决定「取消」的响应延迟上限。
+const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB
 
 /// 工作线程发送给 UI 线程的消息。
 pub enum WorkerMsg {
@@ -47,18 +56,13 @@ impl From<std::io::Error> for WorkerError {
 }
 
 /// 启动后台哈希计算线程，返回 (取消句柄, 消息接收端)。
-pub fn spawn(
-    path: PathBuf,
-    upper: bool,
-    ctx: Context,
-) -> (WorkerHandle, mpsc::Receiver<WorkerMsg>) {
+pub fn spawn(path: PathBuf, upper: bool) -> (WorkerHandle, mpsc::Receiver<WorkerMsg>) {
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
-    let ctx_clone = ctx.clone();
 
     thread::spawn(move || {
-        let result = compute(&path, upper, &cancel_clone, &ctx_clone, &tx);
+        let result = compute(&path, upper, &cancel_clone, &tx);
         let msg = match result {
             Ok((md5, sha256, elapsed_ms)) => WorkerMsg::Done {
                 md5,
@@ -69,7 +73,6 @@ pub fn spawn(
             Err(WorkerError::Other(e)) => WorkerMsg::Error(e),
         };
         let _ = tx.send(msg);
-        ctx.request_repaint();
     });
 
     (WorkerHandle { cancel }, rx)
@@ -79,7 +82,6 @@ fn compute(
     path: &Path,
     upper: bool,
     cancel: &AtomicBool,
-    ctx: &Context,
     tx: &Sender<WorkerMsg>,
 ) -> Result<(String, String, u128), WorkerError> {
     let start = Instant::now();
@@ -96,18 +98,11 @@ fn compute(
     let mut md5 = md5::Md5::new();
     let mut sha256 = sha2::Sha256::new();
 
-    const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB 视图，减少映射/分块开销
-    const UPDATE_INTERVAL: u64 = 256 * 1024 * 1024; // 每 256MB 更新一次进度
-
     let mut current: u64 = 0;
-    let mut last_update: u64 = 0;
+    let mut last_update = Instant::now();
 
     // 初始进度
-    let _ = tx.send(WorkerMsg::Progress {
-        current: 0,
-        total,
-    });
-    ctx.request_repaint();
+    let _ = tx.send(WorkerMsg::Progress { current: 0, total });
 
     for chunk in mmap.chunks(CHUNK_SIZE) {
         if cancel.load(Ordering::Relaxed) {
@@ -117,10 +112,10 @@ fn compute(
         sha256.update(chunk);
         current += chunk.len() as u64;
 
-        if current - last_update >= UPDATE_INTERVAL || current >= total {
+        // 按时间节流：保证进度连续，又不因小文件频繁发送
+        if last_update.elapsed() >= PROGRESS_INTERVAL || current >= total {
             let _ = tx.send(WorkerMsg::Progress { current, total });
-            ctx.request_repaint();
-            last_update = current;
+            last_update = Instant::now();
         }
     }
 
