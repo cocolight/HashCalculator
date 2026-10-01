@@ -96,11 +96,10 @@ fn compute(
 
     let file = std::fs::File::open(path)?;
     let total = file.metadata()?.len();
-    if total == 0 {
-        return Err(WorkerError::Other("文件为空".into()));
-    }
 
     // 跨平台内存映射文件（Windows: CreateFileMapping; Linux/macOS: mmap）
+    // 0 字节文件同样可映射：memmap2 在 Windows 上对长度为 0 的情况不会调用
+    // CreateFileMappingW（该调用会返回 ERROR_FILE_INVALID），而是直接给出空切片。
     let mmap = unsafe { Mmap::map(&file) }?;
 
     // 初始进度
@@ -210,4 +209,48 @@ fn hash_stream<D: Digest>(
         done.store(processed, Ordering::Relaxed);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// 在临时目录创建内容为 `bytes` 的文件，返回路径（由调用方负责删除）。
+    /// 文件名带进程 id，避免并发用例互相覆盖。
+    fn temp_file(tag: &str, bytes: &[u8]) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("hash_calculator_{}_{tag}", std::process::id()));
+        let mut f = std::fs::File::create(&path).expect("create temp file");
+        f.write_all(bytes).expect("write temp file");
+        f.flush().expect("flush temp file");
+        path
+    }
+
+    /// 走真实 worker 路径计算，返回 (md5, sha256)；出错则直接 panic。
+    fn hash_via_worker(path: &Path, upper: bool) -> (String, String) {
+        let (_handle, rx) = spawn(path.to_path_buf(), upper);
+        loop {
+            match rx.recv().expect("worker channel closed before Done") {
+                WorkerMsg::Progress { .. } => {}
+                WorkerMsg::Done { md5, sha256, .. } => return (md5, sha256),
+                WorkerMsg::Error(e) => panic!("unexpected error: {e}"),
+                WorkerMsg::Cancelled => panic!("unexpected cancellation"),
+            }
+        }
+    }
+
+    /// 0 字节文件必须按哈希标准输出空输入摘要，而不是报错「文件为空」。
+    #[test]
+    fn empty_file_hashes_match_standard() {
+        let path = temp_file("empty", b"");
+        let (md5, sha256) = hash_via_worker(&path, false);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(md5, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(
+            sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 }
