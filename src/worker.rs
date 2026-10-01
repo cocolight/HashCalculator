@@ -3,9 +3,13 @@
 //!
 //! 本模块不依赖 egui：UI 侧在计算期间每帧 `request_repaint()`，进度消息由
 //! `app::HashApp::poll_worker` 在主线程消费，因此工作线程无需（也不应）触碰 ctx。
+//!
+//! 加速策略：单文件是 Merkle–Damgård 链，块与块之间必须顺序计算，无法按块并行；
+//! 唯一可并行的是**两个互相独立的算法** —— MD5 与 SHA-256 各占一核，两线程各自
+//! 遍历同一块 mmap（零拷贝），总耗时 ≈ max(MD5, SHA-256)。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -20,6 +24,13 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 处理粒度：既决定循环开销，也决定「取消」的响应延迟上限。
 const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB
+
+/// 协调线程的轮询间隔：决定「一侧算法完工」后多久被察觉。
+/// 必须远小于 PROGRESS_INTERVAL，否则小文件会被节流间隔拖慢。
+const POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// 并发开关：出问题时改为 `false` 即可退回单线程顺序计算，无需改其他代码。
+const PARALLEL: bool = true;
 
 /// 工作线程发送给 UI 线程的消息。
 pub enum WorkerMsg {
@@ -95,37 +106,14 @@ fn compute(
     // 跨平台内存映射文件（Windows: CreateFileMapping; Linux/macOS: mmap）
     let mmap = unsafe { Mmap::map(&file) }?;
 
-    let mut md5 = md5::Md5::new();
-    let mut sha256 = sha2::Sha256::new();
-
-    let mut current: u64 = 0;
-    let mut last_update = Instant::now();
-
     // 初始进度
     let _ = tx.send(WorkerMsg::Progress { current: 0, total });
 
-    for chunk in mmap.chunks(CHUNK_SIZE) {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(WorkerError::Cancelled);
-        }
-        md5.update(chunk);
-        sha256.update(chunk);
-        current += chunk.len() as u64;
-
-        // 按时间节流：保证进度连续，又不因小文件频繁发送
-        if last_update.elapsed() >= PROGRESS_INTERVAL || current >= total {
-            let _ = tx.send(WorkerMsg::Progress { current, total });
-            last_update = Instant::now();
-        }
-    }
-
-    // 循环结束后再检查一次取消
-    if cancel.load(Ordering::Relaxed) {
-        return Err(WorkerError::Cancelled);
-    }
-
-    let md5_hex = hex::encode(md5.finalize());
-    let sha256_hex = hex::encode(sha256.finalize());
+    let (md5_hex, sha256_hex) = if PARALLEL {
+        hash_parallel(&mmap, total, cancel, tx)?
+    } else {
+        hash_serial(&mmap, total, cancel, tx)?
+    };
 
     let md5_result = if upper {
         md5_hex.to_uppercase()
@@ -140,4 +128,127 @@ fn compute(
 
     let elapsed_ms = start.elapsed().as_millis();
     Ok((md5_result, sha256_result, elapsed_ms))
+}
+
+/// 单线程顺序计算：MD5 与 SHA-256 交替更新同一次遍历。
+fn hash_serial(
+    mmap: &[u8],
+    total: u64,
+    cancel: &AtomicBool,
+    tx: &Sender<WorkerMsg>,
+) -> Result<(String, String), WorkerError> {
+    let mut md5 = md5::Md5::new();
+    let mut sha256 = sha2::Sha256::new();
+
+    let mut current: u64 = 0;
+    let mut last_update = Instant::now();
+
+    for chunk in mmap.chunks(CHUNK_SIZE) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(WorkerError::Cancelled);
+        }
+        md5.update(chunk);
+        sha256.update(chunk);
+        current += chunk.len() as u64;
+
+        if last_update.elapsed() >= PROGRESS_INTERVAL || current >= total {
+            let _ = tx.send(WorkerMsg::Progress { current, total });
+            last_update = Instant::now();
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(WorkerError::Cancelled);
+    }
+
+    Ok((hex::encode(md5.finalize()), hex::encode(sha256.finalize())))
+}
+
+/// 双线程并行：MD5 与 SHA-256 各自遍历同一份 mmap，各占一核。
+fn hash_parallel(
+    mmap: &[u8],
+    total: u64,
+    cancel: &AtomicBool,
+    tx: &Sender<WorkerMsg>,
+) -> Result<(String, String), WorkerError> {
+    let md5_done = AtomicU64::new(0);
+    let sha_done = AtomicU64::new(0);
+
+    let (md5_ok, sha_ok, md5_hex, sha_hex) = thread::scope(|scope| {
+        let h_md5 = scope.spawn(|| {
+            let mut h = md5::Md5::new();
+            let ok = hash_stream(mmap, &mut h, &md5_done, cancel);
+            let hex = if ok { hex::encode(h.finalize()) } else { String::new() };
+            (ok, hex)
+        });
+        let h_sha = scope.spawn(|| {
+            let mut h = sha2::Sha256::new();
+            let ok = hash_stream(mmap, &mut h, &sha_done, cancel);
+            let hex = if ok { hex::encode(h.finalize()) } else { String::new() };
+            (ok, hex)
+        });
+
+        // 协调线程：细粒度轮询，保证某一侧算法完工后立即返回（避免小文件
+        // 被节流间隔拖慢）；进度本身仍按 PROGRESS_INTERVAL 节流上报。
+        let mut last_sent = Instant::now();
+        loop {
+            // 两侧都结束（正常或异常）即可退出，异常时不死等
+            if h_md5.is_finished() && h_sha.is_finished() {
+                break;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            // 取两者已完成字节数的较小值 —— 慢的那个算法决定整体完工进度
+            let cur = md5_done
+                .load(Ordering::Relaxed)
+                .min(sha_done.load(Ordering::Relaxed));
+            if last_sent.elapsed() >= PROGRESS_INTERVAL {
+                let _ = tx.send(WorkerMsg::Progress {
+                    current: cur,
+                    total,
+                });
+                last_sent = Instant::now();
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+
+        let (m_ok, m_hex) = h_md5.join().unwrap_or((false, String::new()));
+        let (s_ok, s_hex) = h_sha.join().unwrap_or((false, String::new()));
+        (m_ok, s_ok, m_hex, s_hex)
+    });
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(WorkerError::Cancelled);
+    }
+    if !md5_ok || !sha_ok {
+        return Err(WorkerError::Other("计算线程异常终止".into()));
+    }
+
+    // 收尾进度，确保进度条走到 100%
+    let _ = tx.send(WorkerMsg::Progress {
+        current: total,
+        total,
+    });
+    Ok((md5_hex, sha_hex))
+}
+
+/// 让一个 hasher 顺序跑完整块数据；`done` 记录已完成字节数供进度读取。
+/// 返回 `false` 表示中途收到取消信号。
+fn hash_stream<D: Digest>(
+    mmap: &[u8],
+    hasher: &mut D,
+    done: &AtomicU64,
+    cancel: &AtomicBool,
+) -> bool {
+    let mut processed: u64 = 0;
+    for chunk in mmap.chunks(CHUNK_SIZE) {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        hasher.update(chunk);
+        processed += chunk.len() as u64;
+        done.store(processed, Ordering::Relaxed);
+    }
+    true
 }
