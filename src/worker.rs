@@ -29,9 +29,6 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB
 /// 必须远小于 PROGRESS_INTERVAL，否则小文件会被节流间隔拖慢。
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
-/// 并发开关：出问题时改为 `false` 即可退回单线程顺序计算，无需改其他代码。
-const PARALLEL: bool = true;
-
 /// 工作线程发送给 UI 线程的消息。
 pub enum WorkerMsg {
     Progress { current: u64, total: u64 },
@@ -109,11 +106,7 @@ fn compute(
     // 初始进度
     let _ = tx.send(WorkerMsg::Progress { current: 0, total });
 
-    let (md5_hex, sha256_hex) = if PARALLEL {
-        hash_parallel(&mmap, total, cancel, tx)?
-    } else {
-        hash_serial(&mmap, total, cancel, tx)?
-    };
+    let (md5_hex, sha256_hex) = hash_parallel(&mmap, total, cancel, tx)?;
 
     let md5_result = if upper {
         md5_hex.to_uppercase()
@@ -128,40 +121,6 @@ fn compute(
 
     let elapsed_ms = start.elapsed().as_millis();
     Ok((md5_result, sha256_result, elapsed_ms))
-}
-
-/// 单线程顺序计算：MD5 与 SHA-256 交替更新同一次遍历。
-fn hash_serial(
-    mmap: &[u8],
-    total: u64,
-    cancel: &AtomicBool,
-    tx: &Sender<WorkerMsg>,
-) -> Result<(String, String), WorkerError> {
-    let mut md5 = md5::Md5::new();
-    let mut sha256 = sha2::Sha256::new();
-
-    let mut current: u64 = 0;
-    let mut last_update = Instant::now();
-
-    for chunk in mmap.chunks(CHUNK_SIZE) {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(WorkerError::Cancelled);
-        }
-        md5.update(chunk);
-        sha256.update(chunk);
-        current += chunk.len() as u64;
-
-        if last_update.elapsed() >= PROGRESS_INTERVAL || current >= total {
-            let _ = tx.send(WorkerMsg::Progress { current, total });
-            last_update = Instant::now();
-        }
-    }
-
-    if cancel.load(Ordering::Relaxed) {
-        return Err(WorkerError::Cancelled);
-    }
-
-    Ok((hex::encode(md5.finalize()), hex::encode(sha256.finalize())))
 }
 
 /// 双线程并行：MD5 与 SHA-256 各自遍历同一份 mmap，各占一核。
